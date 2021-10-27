@@ -1,0 +1,162 @@
+```{r}
+library(sf)
+library(terra)
+library(purrr)
+library(dplyr)
+library(ggplot2)
+library(tmap)
+
+```
+
+
+```{r}
+# extract the extent of the dhm as a vector
+
+dhm <- terra::rast("/home/nils/ownCloud/Projekte/0002_MyBlog/_posts/2020-06-04-rayshader/data-git-lfs/DHM25_MM_ASCII_GRID/ASCII_GRID_1part/dhm25_grid_raster.asc")
+
+crs(dhm) <- "epsg: 21781"
+
+switz <- sf::read_sf("/home/nils/ownCloud/Lehre/Master/ResearchMethods/2021_HS/git_repos/datasets/rauman_source/swissboundaries3d_2021-07_2056_5728.shp/SHAPEFILE_LV95_LN02/swissBOUNDARIES3D_1_3_TLM_LANDESGEBIET.shp")
+
+switz <- st_transform(switz, 21781)
+
+
+dhm2 <- terra::mask(dhm, as(switz, "SpatVector"))
+
+jp1 <- tm_shape(dhm2) + tm_raster(palette = "viridis",style = "cont",legend.show = FALSE) +
+  tm_layout(frame = FALSE)
+
+tmap_save(jp1, filename = "images/joyplot-1.png")
+```
+
+
+```{r}
+ex <- ext(dhm) %>%
+  as.vector()
+
+n_lines <- 30
+vspace <- (ex["ymax"] - ex["ymin"])/n_lines
+
+point_density <- 1/terra::res(dhm)[2]
+
+# Defines at what y-coordinates elevation should be extracted
+heights <- seq(ex["ymin"], ex["ymax"], vspace)
+
+# calculates the x/y coordinates to extract points from the dhm
+mypoints_mat <- map(heights, function(height){
+  matrix(c(ex["xmin"], height, ex["xmax"], height), ncol = 2, byrow = TRUE) %>%
+    st_linestring()
+}) %>%
+  st_as_sfc() %>%
+  st_line_sample(density = point_density,type = "regular") %>%
+  st_as_sf() %>%
+  st_cast("POINT") %>%
+  st_coordinates()
+
+mypoints_sf <- st_as_sf(as.data.frame(mypoints_mat), coords = c(1,2), crs = 21781)
+
+jp2 <- jp1 + 
+  tm_shape(mypoints_sf) + tm_dots()
+
+jp2
+
+tmap_save(jp2, filename = "images/joyplot-2.png")
+
+```
+
+
+```{r}
+# extracts the elevation from the dhm
+extracted <- terra::extract(dhm, mypoints_mat) %>% 
+  cbind(mypoints_mat) %>% 
+  tibble::as_tibble()
+
+extracted_sf <- st_as_sf(as.data.frame(extracted), coords = c("X","Y"), crs = 21781)
+
+jp3 <- tm_shape(extracted_sf) + tm_dots(col = "dhm25_grid_raster",palette = "viridis", legend.show = FALSE) +
+  tm_layout(frame = FALSE)
+
+tmap_save(jp3, filename = "images/joyplot-3.png")
+
+```
+
+
+
+```{r}
+# calculates the factor with which to multiply elevation, based on "fac" and the maximum elevation value
+fac = 2
+fac <- vspace*fac/max(extracted[,1], na.rm = TRUE)
+
+# calculates the coordinates of the ridge lines
+coords <-extracted %>%
+  filter(!is.na(pull(extracted[,1]))) %>%
+  split(.$Y) %>%
+  imap(function(df, hig){
+    hig <- as.numeric(hig)
+    yoff <- pull(df[,1])*fac
+    Y_new <- hig+yoff
+    matrix(c(df$X, Y_new, yoff), ncol = 3)
+  })
+
+
+
+coords_sf2 <- map_dfr(coords, ~as.data.frame(.x)) %>%
+  st_as_sf(coords = c("V1", "V2"), crs = 21781)
+
+jp4 <- tm_shape(coords_sf2) + tm_dots(col = "V3", palette = "viridis",legend.show = FALSE, style = "cont") +
+  tm_layout(frame = FALSE)
+
+tmap_save(jp4, filename = "images/joyplot-4.png")
+
+
+coords <- map(coords, ~.x[,1:2])
+
+```
+
+
+```{r}
+# creates LINESTRING or POLYGON, based on the "geom_type"
+geom_type <- "POLYGON"
+geoms <- if(geom_type == "LINESTRING"){
+  map(coords, ~st_linestring(.x))
+} else if(geom_type == "POLYGON"){
+  imap(coords, function(x, hig){
+    hig <- as.numeric(hig)
+    
+    first <- head(x, 1)
+    first[,2] <- hig
+    last <- tail(x, 1)
+    last[,2] <- hig
+    
+    st_polygon(list(rbind(first, x, last, first)))
+  })
+} else{
+  stop(paste0("This geom_type is not implemented:",geom_type,". geom_type must be 'LINESTRING' or 'POLYGON'"))
+}
+
+# adds the CRS to the output sfc
+dhm_crs <- crs(dhm)
+
+geoms2 <- geoms %>%
+  st_sfc() %>%
+  st_set_crs(21781)
+
+jp5 <- tm_shape(geoms2) + tm_polygons() +
+  tm_layout(frame = FALSE)
+
+tmap_save(jp5, filename = "images/joyplot-5.png")
+```
+
+```{r}
+
+geoms3 <- st_intersection(geoms2, st_union(switz))
+
+
+jp6 <- tm_shape(geoms3) + tm_polygons(col = "#EB4960",border.col = "#27363B") +
+  tm_layout(frame = FALSE,bg.color = "#27363B")
+
+
+tmap_save(jp6, filename = "images/joyplot-6.png")
+
+```
+
